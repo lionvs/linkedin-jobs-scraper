@@ -67,7 +67,7 @@ if __name__ == "__main__":
     search_keys = parse_command_line_args()
 
     # initialize selenium webdriver - pass latest chromedriver path to webdriver.Chrome()
-    driver = webdriver.Chrome('/usr/bin/chromedriver')
+    driver = webdriver.Chrome('chromedriver')
     driver.get("https://www.linkedin.com/uas/login")
 
     # initialize LinkedIn web client
@@ -81,13 +81,7 @@ if __name__ == "__main__":
     assert isinstance(search_keys["keyword"], list)
     assert isinstance(search_keys["location"], list)
 
-    for keyword in search_keys["keyword"]:
-        for location in search_keys["location"]:
-            liclient.keyword  = keyword
-            liclient.location = location
-            liclient.navigate_to_jobs_page()
-            liclient.enter_search_keys()
-            liclient.customize_search_results()
-            liclient.navigate_search_results()
+    liclient.navigate_to_jobs_page(0)
+    liclient.navigate_search_results()
 
     liclient.driver_quit()

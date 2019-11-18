@@ -6,10 +6,13 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from scrape import *
+import psycopg2
 import datetime
 import json
 import time
-
+import html
+import re
+from urllib import parse
 
 def write_line_to_file(filename, data):
     """
@@ -160,13 +163,13 @@ def robust_wait_for_clickable_element(driver, delay, selector):
             else:
                 clickable = True
 
-def robust_click(driver, delay, selector):
+def robust_click(driver, delay, selector, i):
     """
     use a while-looop to click an element. For stubborn links
     and general unexpected browser errors.
     """
     try:
-        driver.find_element_by_xpath(selector).click()
+        driver.find_elements(By.CLASS_NAME, selector)[i].click()
     except Exception as e:
         print("  The job post link was likely hidden,\n    An " \
                 "error was encountered while attempting to click link" \
@@ -175,7 +178,7 @@ def robust_click(driver, delay, selector):
         clicked = False
         while not clicked:
             try:
-                driver.find_element_by_xpath(selector).click()
+                driver.find_elements(By.CLASS_NAME, selector)[i].click()
             except Exception as e:
                 pass
             else:
@@ -185,8 +188,7 @@ def robust_click(driver, delay, selector):
             finally:
                 attempts += 1
                 if attempts % 100 == 0:
-                    print("--------------  refreshing page")
-                    driver.refresh()
+                    print("Out of list")
                     time.sleep(5)
                 if attempts > 10**3:
                     print(selector)
@@ -257,7 +259,7 @@ def search_suggestion_box_is_present(driver, selector, index, results_page):
     else:
         return False
 
-def next_results_page(driver, delay):
+def next_results_page(driver, delay, page):
     """
     navigate to the next page of search results. If an error is encountered
     then the process ends or new search criteria are entered as the current 
@@ -265,19 +267,16 @@ def next_results_page(driver, delay):
     """
     try:
         # wait for the next page button to load
-        print("  Moving to the next page of search results... \n" \
-                "  If search results are exhausted, will wait {} seconds " \
-                "then either execute new search or quit".format(delay))
-        wait_for_clickable_element_css(driver, delay, "a.next-btn")
-        # navigate to next page
-        driver.find_element_by_css_selector("a.next-btn").click()
+        url = "https://www.linkedin.com/jobs/search/?geoId=103977389&keywords=data%20scientist&location=Washington%2C%20United%20States&" + "start=" + str(
+            page * 25)
+        driver.get(url)
     except Exception as e:
         print ("\nFailed to click next page link; Search results " \
                                 "may have been exhausted\n{}".format(e))
         raise ValueError("Next page link not detected; search results exhausted")
     else:
         # wait until the first job post button has loaded
-        first_job_button = "a.job-title-link"
+        first_job_button = ".js-focusable"
         # wait for the first job post button to load
         wait_for_clickable_element_css(driver, delay, first_job_button)
 
@@ -314,45 +313,11 @@ def print_num_search_results(driver, keyword, location):
     print("\n\n\n\n\nSearching  {}  results for  '{}'  jobs in  '{}' " \
             "\n\n\n\n\n".format(num_results, keyword, location))
 
-def extract_transform_load(driver, delay, selector, date, 
-                           keyword, location, filename):
-    """
-    using the next job posting selector on a given results page, wait for
-    the link to become clickable, then navigate to it. Wait for the job 
-    posting page to load, then scrape the page and write the data to file.
-    Finally, go back to the search results page
-    """
-    # wait for the job post to load then navigate to it
-    try:
-        wait_for_clickable_element(driver, delay, selector)
-        robust_click(driver, delay, selector)
-    except Exception as e:
-        print("error navigating to job post page")
-        print(e)
-    try:
-        # wait for the premium applicant insights to load
-        # wait_for_clickable_element(driver, delay, "div.premium-insights")
-        WebDriverWait(driver, delay).until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "div.premium-insights")
-                )
-            )
-    except Exception as e:
-        print(e)
-
-    try:
-        # scrape page and prepare to write the data to file
-        data = scrape_page(driver, keyword=keyword, location=location, dt=date)
-    except Exception as e:
-        print("\nSearch results may have been exhausted. An error was " \
-                "encountered while attempting to scrape page data")
-        print(e)
-    else:
-        # write data to file
-        write_line_to_file(filename, data)
-    finally:
-        if not ("Search | LinkedIn" in driver.title):
-            driver.execute_script("window.history.go(-1)")
+def extract_transform_load(driver,cursor, conn):
+    htmlData = driver.find_element_by_css_selector('.jobs-search-two-pane__details').get_attribute('innerHTML')
+    url = driver.current_url
+    cursor.execute("INSERT INTO jobs(html, url) VALUES (%s, %s)", (htmlData, url))
+    conn.commit()
 
 
 class LIClient(object):
@@ -366,6 +331,8 @@ class LIClient(object):
         self.sort_by        =  kwargs["sort_by"]
         self.salary_range   =  kwargs["salary_range"]
         self.results_page   =  kwargs["results_page"]
+        self.connection = psycopg2.connect("postgres://postgres:@localhost:5432/linkedin")
+        self.cursor = self.connection.cursor()
 
     def driver_quit(self):
         self.driver.quit()
@@ -375,40 +342,28 @@ class LIClient(object):
         # Enter login credentials
         WebDriverWait(self.driver, 120).until(
             EC.element_to_be_clickable(
-                (By.ID, "session_key-login")
+                (By.ID, "password")
             )
         )
-        elem = self.driver.find_element_by_id("session_key-login")
+        elem = self.driver.find_element_by_id("username")
         elem.send_keys(self.username)
-        elem = self.driver.find_element_by_id("session_password-login")
+        elem = self.driver.find_element_by_id("password")
         elem.send_keys(self.password)
         # Enter credentials with Keys.RETURN
         elem.send_keys(Keys.RETURN)
         # Wait a few seconds for the page to load
         time.sleep(3)
 
-    def navigate_to_jobs_page(self):
+    def navigate_to_jobs_page(self, page):
         """
         navigate to the 'Jobs' page since it is a convenient page to 
         enter a custom job search.
         """
-        # Click the Jobs search page
+        # Click the Jobs    search page
         jobs_link_clickable = False
         attempts = 1
-        url = "https://www.linkedin.com/jobs/?trk=nav_responsive_sub_nav_jobs"
-        while not jobs_link_clickable:
-            try:
-                self.driver.get(url)
-            except Exception as e:
-                attempts += 1
-                if attempts > 10**3: 
-                    print("  jobs page not detected")
-                    break
-                pass
-            else:
-                print("**************************************************")
-                print ("\n\n\nSuccessfully navigated to jobs search page\n\n\n")
-                jobs_link_clickable = True
+
+        next_results_page(self.driver, 0, page)
 
     def enter_search_keys(self):
         """
@@ -441,6 +396,8 @@ class LIClient(object):
         self.driver.execute_script("window.scrollTo(0, 0);")
         sort_results_by(self.driver, self.sort_by)
 
+# job-view-layout jobs-details ember-view
+
     def navigate_search_results(self):
         """
         scrape postings for all pages in search results
@@ -451,38 +408,34 @@ class LIClient(object):
         delay = 60
         date = get_date_time()
         # css elements to view job pages
-        list_element_tag = '/descendant::a[@class="job-title-link"]['
-        print_num_search_results(driver, self.keyword, self.location)
+        list_element_tag = 'js-focusable'
+        # print_num_search_results(driver, self.keyword, self.location)
         # go to a specific results page number if one is specified
-        go_to_specific_results_page(driver, delay, results_page)
         results_page = results_page if results_page > 1 else 1
 
         while not search_results_exhausted:
-            for i in range(1,26):  # 25 results per page
+            for i in range(0,25):  # 25 results per page
                 # define the css selector for the blue 'View' button for job i
-                job_selector = list_element_tag + str(i) + ']'
-                if search_suggestion_box_is_present(driver, 
-                                            job_selector, i, results_page):
-                    continue
-                # wait for the selector for the next job posting to load.
-                # if on last results page, then throw exception as job_selector 
-                # will not be detected on the page
-                if not link_is_present(driver, delay, 
-                                         job_selector, i, results_page):
-                    continue
+                job_selector = list_element_tag
+                # if search_suggestion_box_is_present(driver,
+                #                             job_selector, i, results_page):
+                #     continue
+                # # wait for the selector for the next job posting to load.
+                # # if on last results page, then throw exception as job_selector
+                # # will not be detected on the page
+                # if not link_is_present(driver, delay,
+                #                          job_selector, i, results_page):
+                #     continue
                 robust_wait_for_clickable_element(driver, delay, job_selector)
+                robust_click(driver, delay, job_selector, i)
+
                 extract_transform_load(driver,
-                                       delay,
-                                       job_selector,
-                                       date,
-                                       self.keyword,
-                                       self.location,
-                                       self.filename)
+                                       self.cursor, self.connection)
             # attempt to navigate to the next page of search results
             # if the link is not present, then the search results have been 
             # exhausted
             try:
-                next_results_page(driver, delay)
+                next_results_page(driver, delay, ++results_page)
                 print("\n**************************************************")
                 print("\n\n\nNavigating to results page  {}" \
                       "\n\n\n".format(results_page + 1))
